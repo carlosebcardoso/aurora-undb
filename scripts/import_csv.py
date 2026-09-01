@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Importa os CSVs das tabelas fixas do projeto usando SQLAlchemy."""
+"""Converte os CSVs em uma base SQLite limpa e pronta para análise."""
 
 from __future__ import annotations
 
@@ -13,17 +13,16 @@ from typing import Any
 from sqlalchemy import Boolean, Date, Float, Integer, String, create_engine, insert, inspect
 from sqlalchemy.orm import Session
 
-# Permite executar tanto `python -m scripts.import_csv` quanto
-# `python scripts/import_csv.py` a partir da raiz do projeto.
+# Permite executar diretamente a partir da raiz do projeto.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from models import Base, Clientes, Interacoes, Pedidos
+from models import Base, Clientes, Interacoes, PedidoItens, Pedidos
+from scripts.limpeza import DATAS_SENTINELA, UF_PARA_SIGLA, normalizar_texto, normalizar_uf
 
 
-MODELOS = {"clientes": Clientes, "interacoes": Interacoes, "pedidos": Pedidos}
+TAMANHO_LOTE = 1000
 
 
 def converter_valor(valor: str, tipo: Any, tabela: str, coluna: str, linha: int) -> Any:
-    """Converte um valor textual para o tipo SQLAlchemy da coluna."""
     valor = valor.strip()
     if not valor:
         return None
@@ -46,70 +45,118 @@ def converter_valor(valor: str, tipo: Any, tabela: str, coluna: str, linha: int)
         return valor
     except ValueError as erro:
         raise ValueError(
-            f"{tabela}.{coluna}, linha {linha}: '{valor}' inválido para {tipo} ({erro})"
+            f"{tabela}.{coluna}, linha {linha}: '{valor}' inválido ({erro})"
         ) from erro
 
 
-def importar_csv(session: Session, arquivo: Path, modelo: type[Base]) -> str:
-    """Lê um CSV e insere seus registros usando o model ORM correspondente."""
-    tabela = modelo.__table__
+def inserir_em_lotes(session: Session, modelo: type[Base], registros: list[dict[str, Any]]) -> None:
+    for inicio in range(0, len(registros), TAMANHO_LOTE):
+        session.execute(insert(modelo), registros[inicio : inicio + TAMANHO_LOTE])
 
+
+def colunas_do_csv(modelo: type[Base]) -> list[str]:
+    return [coluna.name for coluna in modelo.__table__.columns if coluna.autoincrement is not True]
+
+
+def validar_cabecalho(cabecalho: list[str], esperadas: list[str], arquivo: Path) -> None:
+    if set(cabecalho) != set(esperadas) or len(cabecalho) != len(set(cabecalho)):
+        faltantes = sorted(set(esperadas) - set(cabecalho))
+        extras = sorted(set(cabecalho) - set(esperadas))
+        detalhes = []
+        if faltantes:
+            detalhes.append(f"faltam: {', '.join(faltantes)}")
+        if extras:
+            detalhes.append(f"extras: {', '.join(extras)}")
+        raise ValueError(f"'{arquivo.name}': cabeçalho incompatível ({'; '.join(detalhes)})")
+
+
+def ler_registros(arquivo: Path, modelo: type[Base]) -> list[dict[str, Any]]:
+    colunas_model = {coluna.name: coluna for coluna in modelo.__table__.columns}
+    esperadas = colunas_do_csv(modelo)
+    registros = []
     with arquivo.open("r", encoding="utf-8-sig", newline="") as stream:
         leitor = csv.DictReader(stream)
         if leitor.fieldnames is None:
-            return f"IGNORADO: '{arquivo.name}' está vazio"
-
-        colunas_csv = [coluna.strip() for coluna in leitor.fieldnames]
-        colunas_model = [coluna.name for coluna in tabela.columns]
-        geradas = {
-            coluna.name for coluna in tabela.columns if coluna.autoincrement is True
-        }
-        esperadas_csv = set(colunas_model) - geradas
-        if set(colunas_csv) != esperadas_csv or len(colunas_csv) != len(set(colunas_csv)):
-            faltantes = sorted(esperadas_csv - set(colunas_csv))
-            desconhecidas = sorted(set(colunas_csv) - set(colunas_model))
-            detalhes = []
-            if faltantes:
-                detalhes.append(f"faltam no CSV: {', '.join(faltantes)}")
-            if desconhecidas:
-                detalhes.append(f"não estão no model: {', '.join(desconhecidas)}")
-            raise ValueError(f"colunas incompatíveis ({'; '.join(detalhes)})")
-
-        colunas = {coluna.name: coluna for coluna in tabela.columns}
-        colunas_csv_model = [coluna for coluna in colunas_model if coluna not in geradas]
-        lote = []
-        quantidade = 0
+            return registros
+        cabecalho = [campo.strip() for campo in leitor.fieldnames]
+        validar_cabecalho(cabecalho, esperadas, arquivo)
         for numero_linha, registro in enumerate(leitor, start=2):
             if None in registro:
-                raise ValueError(f"linha {numero_linha}: quantidade de valores diferente do cabeçalho")
+                raise ValueError(f"'{arquivo.name}', linha {numero_linha}: valores extras")
             valores = {
-                coluna: converter_valor(registro[coluna], colunas[coluna].type, tabela.name, coluna, numero_linha)
-                for coluna in colunas_csv_model
+                coluna: converter_valor(registro[coluna], colunas_model[coluna].type, modelo.__tablename__, coluna, numero_linha)
+                for coluna in esperadas
             }
-            lote.append(valores)
-            if len(lote) == 1000:
-                session.execute(insert(modelo), lote)
-                quantidade += len(lote)
-                lote = []
-        if lote:
-            session.execute(insert(modelo), lote)
-            quantidade += len(lote)
-    return f"CARREGADO: tabela '{tabela.name}' ({quantidade} linha(s))"
+            if modelo is Clientes:
+                if valores["uf"] is not None:
+                    valores["uf"] = UF_PARA_SIGLA.get(normalizar_uf(valores["uf"]), valores["uf"])
+                for campo in ("cidade", "canal_aquisicao", "tier_clube"):
+                    if valores[campo] is not None:
+                        valores[campo] = normalizar_texto(valores[campo])
+            elif modelo is Interacoes and valores["motivo_sac_principal"] is not None:
+                valores["motivo_sac_principal"] = normalizar_texto(valores["motivo_sac_principal"])
+            registros.append(valores)
+    return registros
 
 
-def argumentos() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--pasta", type=Path, default=Path("dados"))
-    parser.add_argument("--banco", type=Path, default=Path("dados.sqlite3"))
-    parser.add_argument(
-        "--reiniciar", action="store_true",
-        help="apaga as tabelas fixas e carrega os CSVs novamente",
-    )
-    return parser.parse_args()
+def ler_pedidos(arquivo: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+    """Separa o CSV bruto em pedidos únicos e seus itens."""
+    tipos_pedido = {coluna.name: coluna.type for coluna in Pedidos.__table__.columns}
+    tipos_item = {coluna.name: coluna.type for coluna in PedidoItens.__table__.columns}
+    campos_pedido = ["id_pedido", "id_cliente", "data_pedido", "canal", "cupom_utilizado", "prazo_entrega_dias", "atraso_entrega_dias"]
+    campos_item = ["categoria", "sku", "quantidade", "valor_unitario", "valor_desconto", "margem_bruta_pct"]
+    esperadas = campos_pedido + campos_item
+    grupos: dict[str, dict[str, Any]] = {}
+    with arquivo.open("r", encoding="utf-8-sig", newline="") as stream:
+        leitor = csv.DictReader(stream)
+        if leitor.fieldnames is None:
+            return [], [], 0
+        validar_cabecalho([campo.strip() for campo in leitor.fieldnames], esperadas, arquivo)
+        for numero_linha, registro in enumerate(leitor, start=2):
+            if None in registro:
+                raise ValueError(f"'{arquivo.name}', linha {numero_linha}: valores extras")
+            id_pedido = registro["id_pedido"].strip()
+            pedido = {
+                campo: converter_valor(registro[campo], tipos_pedido[campo], "pedidos", campo, numero_linha)
+                for campo in campos_pedido
+            }
+            item = {"id_pedido": id_pedido}
+            item.update({
+                campo: converter_valor(registro[campo], tipos_item[campo], "pedido_itens", campo, numero_linha)
+                for campo in campos_item
+            })
+            pedido["id_pedido"] = id_pedido
+            pedido["canal"] = normalizar_texto(pedido["canal"]) if pedido["canal"] else None
+            item["categoria"] = normalizar_texto(item["categoria"]) if item["categoria"] else None
+            grupo = grupos.setdefault(id_pedido, {"pedido": pedido, "itens": [], "datas_validas": []})
+            if pedido["data_pedido"] is not None and pedido["data_pedido"] not in DATAS_SENTINELA:
+                grupo["datas_validas"].append(pedido["data_pedido"])
+            grupo["itens"].append(item)
+
+    pedidos = []
+    itens = []
+    removidos = 0
+    for grupo in grupos.values():
+        pedido = grupo["pedido"]
+        datas_validas = grupo["datas_validas"]
+        # As linhas repetidas podem ter datas diferentes; usa uma data válida
+        # de qualquer linha do mesmo id antes de descartar/substituir.
+        if pedido["data_pedido"] in DATAS_SENTINELA:
+            if not datas_validas:
+                removidos += 1
+                continue
+            pedido["data_pedido"] = datas_validas[0]
+        pedidos.append(pedido)
+        itens.extend(grupo["itens"])
+    return pedidos, itens, removidos
 
 
 def main() -> None:
-    args = argumentos()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--pasta", type=Path, default=Path("dados"))
+    parser.add_argument("--banco", type=Path, default=Path("dados.sqlite3"))
+    parser.add_argument("--reiniciar", action="store_true", help="recria a base e converte os CSVs novamente")
+    args = parser.parse_args()
     if not args.pasta.is_dir():
         raise SystemExit(f"A pasta não existe: {args.pasta}")
     arquivos = {arquivo.stem: arquivo for arquivo in args.pasta.glob("*.csv")}
@@ -121,24 +168,31 @@ def main() -> None:
     engine = create_engine(f"sqlite:///{args.banco}")
     if args.reiniciar:
         Base.metadata.drop_all(engine)
-    tabelas_existentes = set(inspect(engine).get_table_names())
+    existentes = set(inspect(engine).get_table_names())
     Base.metadata.create_all(engine)
 
     with Session(engine) as session:
         try:
-            for nome, modelo in MODELOS.items():
-                arquivo = arquivos.get(nome)
-                if arquivo is None:
-                    print(f"IGNORADO: CSV não encontrado para '{nome}'")
-                    continue
-                if nome in tabelas_existentes:
-                    print(f"IGNORADO: tabela '{nome}' já existe")
-                    continue
-                print(importar_csv(session, arquivo, modelo))
+            if "clientes" not in existentes and "clientes" in arquivos:
+                registros = ler_registros(arquivos["clientes"], Clientes)
+                inserir_em_lotes(session, Clientes, registros)
+                print(f"CARREGADO: clientes ({len(registros)} linha(s))")
+            if "interacoes" not in existentes and "interacoes" in arquivos:
+                registros = ler_registros(arquivos["interacoes"], Interacoes)
+                inserir_em_lotes(session, Interacoes, registros)
+                print(f"CARREGADO: interacoes ({len(registros)} linha(s))")
+            if "pedidos" not in existentes and "pedidos" in arquivos:
+                pedidos, itens, removidos = ler_pedidos(arquivos["pedidos"])
+                inserir_em_lotes(session, Pedidos, pedidos)
+                inserir_em_lotes(session, PedidoItens, itens)
+                print(f"CARREGADO: pedidos ({len(pedidos)} linha(s))")
+                print(f"CARREGADO: pedido_itens ({len(itens)} linha(s))")
+                if removidos:
+                    print(f"PEDIDOS REMOVIDOS SEM DATA VÁLIDA: {removidos}")
             session.commit()
         except (csv.Error, ValueError) as erro:
             session.rollback()
-            raise SystemExit(f"Erro na importação: {erro}") from erro
+            raise SystemExit(f"Erro na conversão: {erro}") from erro
 
 
 if __name__ == "__main__":

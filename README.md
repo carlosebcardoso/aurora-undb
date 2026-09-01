@@ -38,13 +38,13 @@ python scripts/import_csv.py --pasta ./meus-csvs --banco ./meu-banco.sqlite3
 
 Cada CSV vira uma tabela com o mesmo nome do arquivo, usando os modelos ORM fixos em `models/`. Após a migração estrutural, `clientes.id_cliente` e `pedidos.id_pedido` são chaves primárias; `interacoes` e `pedido_itens` usam uma chave técnica `id` autoincrementada. O cabeçalho deve conter as colunas do respectivo model. Campos vazios viram `NULL`, e os tipos são convertidos pelo SQLAlchemy. Depois de carregada, uma tabela existente é ignorada.
 
-Para aplicar a normalização estrutural que separa os itens de pedido e cria as chaves relacionais, execute uma vez:
+A conversão já cria o schema final, separa os itens de pedido, remove duplicidades, aplica as limpezas e cria as chaves relacionais. Para converter novamente os CSVs desde o início:
 
 ```bash
-python3 scripts/migrar_pedidos.py --banco ./dados.sqlite3
+python3 scripts/import_csv.py --pasta ./dados --banco ./dados.sqlite3 --reiniciar
 ```
 
-Essa migração cria `pedido_itens`, mantém uma linha por `id_pedido` em `pedidos` e transforma `id_cliente` e `id_pedido` nas chaves primárias dos respectivos pais.
+O resultado cria `pedido_itens`, mantém uma linha por `id_pedido` em `pedidos` e usa `id_cliente` e `id_pedido` como chaves primárias dos respectivos pais.
 
 Para carregar novamente os dados desde o início:
 
