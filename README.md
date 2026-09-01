@@ -110,3 +110,29 @@ Para calcular a média de atraso de entrega por UF, desconsiderando pedidos sem 
 ```bash
 python3 scripts/media_atraso_por_uf.py --banco ./dados.sqlite3
 ```
+
+Para adicionar e atualizar a coluna `inativo` na tabela `clientes`, considerando
+os 180 dias anteriores a 30/06/2026:
+
+```bash
+python3 scripts/marcar_clientes_inativos.py --banco ./dados.sqlite3
+```
+
+Clientes sem pedido há mais de 180 dias recebem `inativo = 1`, exceto quando o
+tempo desde o último pedido ainda estiver dentro da maior entre a média e a
+mediana históricas entre pedidos, mais uma tolerância de 15 dias. Clientes sem
+média ou mediana históricas (menos de dois pedidos) seguem o limite fixo de 180
+dias.
+
+Para criar a tabela `analise_clientes` com os dados cadastrais e as métricas de
+pedidos:
+
+```bash
+python3 scripts/criar_analise_clientes.py --banco ./dados.sqlite3
+```
+
+O campo `canal` é preenchido a partir de `clientes.canal_aquisicao`. A média e o
+desvio padrão são calculados sobre os intervalos entre pedidos consecutivos;
+clientes com menos de dois pedidos ficam com essas métricas como `NULL`. A tabela
+também inclui `maior_intervalo`, `menor_intervalo` e `mediana_pedidos`, calculados
+sobre os mesmos intervalos.
