@@ -11,12 +11,12 @@ from collections import Counter, defaultdict
 from datetime import date
 from pathlib import Path
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, delete, select, text
 from sqlalchemy.orm import Session
 
 # Permite executar diretamente a partir da raiz do projeto.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from models import Clientes, Interacoes, Pedidos
+from models import Clientes, Interacoes, PedidoItens, Pedidos
 
 
 # Remove marcas de acentuação depois da decomposição Unicode (NFD).
@@ -55,7 +55,8 @@ UF_PARA_SIGLA = {
 CAMPOS_TEXTO = {
     Clientes: ("cidade", "canal_aquisicao", "tier_clube"),
     Interacoes: ("motivo_sac_principal",),
-    Pedidos: ("canal", "categoria"),
+    Pedidos: ("canal",),
+    PedidoItens: ("categoria",),
 }
 
 DATAS_SENTINELA = {date(1900, 1, 1), date(2099, 12, 31)}
@@ -65,6 +66,34 @@ def normalizar_texto(valor: str) -> str:
     """Converte texto para maiúsculas e remove seus acentos."""
     valor = unicodedata.normalize("NFD", valor)
     return REGEX_ACENTOS.sub("", valor).upper()
+
+
+def remover_clientes_optout(banco: Path) -> tuple[int, int, int, int]:
+    """Remove clientes opt-out e todos os registros relacionados a eles."""
+    engine = create_engine(f"sqlite:///{banco}")
+    with Session(engine) as session:
+        ids = [id_cliente for (id_cliente,) in session.execute(
+            text("SELECT id_cliente FROM clientes WHERE optout = 1")
+        )]
+        if ids:
+            itens = session.execute(
+                delete(PedidoItens).where(PedidoItens.id_pedido.in_(
+                    select(Pedidos.id_pedido).where(Pedidos.id_cliente.in_(ids))
+                ))
+            ).rowcount or 0
+            pedidos = session.execute(delete(Pedidos).where(Pedidos.id_cliente.in_(ids))).rowcount or 0
+            interacoes = session.execute(delete(Interacoes).where(Interacoes.id_cliente.in_(ids))).rowcount or 0
+            clientes = session.execute(delete(Clientes).where(Clientes.id_cliente.in_(ids))).rowcount or 0
+        else:
+            itens = pedidos = interacoes = clientes = 0
+        session.commit()
+
+    # SQLite não permite remover a coluna com o ORM; DROP COLUMN mantém as
+    # demais colunas e a chave primária intactas.
+    with engine.begin() as conexao:
+        if "optout" in {coluna[1] for coluna in conexao.execute(text("PRAGMA table_info(clientes)"))}:
+            conexao.execute(text("ALTER TABLE clientes DROP COLUMN optout"))
+    return clientes, pedidos, itens, interacoes
 
 
 def limpar_ufs(banco: Path) -> tuple[int, Counter[str]]:
@@ -138,6 +167,19 @@ def corrigir_datas_pedidos(banco: Path) -> tuple[int, int]:
     return corrigidos, removidos
 
 
+def limpar_atrasos_zero(banco: Path) -> int:
+    """Converte atrasos iguais a zero para NULL."""
+    engine = create_engine(f"sqlite:///{banco}")
+    alteracoes = 0
+    with Session(engine) as session:
+        for pedido in session.scalars(select(Pedidos)):
+            if pedido.atraso_entrega_dias == 0:
+                pedido.atraso_entrega_dias = None
+                alteracoes += 1
+        session.commit()
+    return alteracoes
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -148,13 +190,20 @@ def main() -> None:
     if not args.banco.is_file():
         raise SystemExit(f"Banco não encontrado: {args.banco}")
 
+    clientes_removidos, pedidos_removidos, itens_removidos, interacoes_removidas = remover_clientes_optout(args.banco)
     alteracoes, desconhecidos = limpar_ufs(args.banco)
     textos_corrigidos = limpar_campos_texto(args.banco)
     datas_corrigidas, pedidos_removidos = corrigir_datas_pedidos(args.banco)
+    atrasos_corrigidos = limpar_atrasos_zero(args.banco)
     print(f"UFs corrigidas: {alteracoes}")
+    print(f"Clientes removidos por optout true: {clientes_removidos}")
+    print(f"Pedidos removidos por optout true: {pedidos_removidos}")
+    print(f"Itens ligados removidos: {itens_removidos}")
+    print(f"Interações removidas por optout true: {interacoes_removidas}")
     print(f"Campos de texto corrigidos: {textos_corrigidos}")
     print(f"Datas de pedidos corrigidas: {datas_corrigidas}")
     print(f"Pedidos removidos sem outra data válida: {pedidos_removidos}")
+    print(f"Atrasos iguais a zero convertidos para NULL: {atrasos_corrigidos}")
     if desconhecidos:
         print("Valores de UF não reconhecidos (preservados):")
         for valor, quantidade in desconhecidos.most_common():

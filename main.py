@@ -8,6 +8,25 @@ import sqlite3
 from pathlib import Path
 
 
+def imprimir_tabela(colunas: list[str], linhas: list[sqlite3.Row]) -> None:
+    """Imprime resultados tabulares com larguras calculadas por coluna."""
+    valores = [
+        ["" if linha[indice] is None else str(linha[indice]) for indice in range(len(colunas))]
+        for linha in linhas
+    ]
+    larguras = [
+        max([len(coluna)] + [len(linha[indice]) for linha in valores])
+        for indice, coluna in enumerate(colunas)
+    ]
+
+    cabecalho = " | ".join(coluna.ljust(larguras[indice]) for indice, coluna in enumerate(colunas))
+    separador = "-+-".join("-" * largura for largura in larguras)
+    print(cabecalho)
+    print(separador)
+    for linha in valores:
+        print(" | ".join(valor.ljust(larguras[indice]) for indice, valor in enumerate(linha)))
+
+
 def executar_consulta(banco: Path, arquivo_sql: Path) -> None:
     """Abre o banco, executa o script SQL e imprime os resultados."""
     if not banco.exists():
@@ -44,12 +63,8 @@ def executar_consulta(banco: Path, arquivo_sql: Path) -> None:
             return
 
         colunas = [coluna[0] for coluna in descricao]
-        linhas = resultado
-        print(" | ".join(colunas))
-        print("-+-".join("-" * len(coluna) for coluna in colunas))
-        for linha in linhas:
-            print(" | ".join("" if valor is None else str(valor) for valor in linha))
-        print(f"\n{len(linhas)} linha(s).")
+        imprimir_tabela(colunas, resultado)
+        print(f"\n{len(resultado)} linha(s).")
 
 
 def main() -> None:

@@ -18,4 +18,3 @@ class Clientes(Base):
     canal_aquisicao: Mapped[str | None] = mapped_column(String)
     tier_clube: Mapped[str | None] = mapped_column(String)
     optin_email: Mapped[bool | None] = mapped_column(Boolean)
-    optout: Mapped[bool | None] = mapped_column(Boolean)

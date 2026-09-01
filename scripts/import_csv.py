@@ -70,19 +70,25 @@ def validar_cabecalho(cabecalho: list[str], esperadas: list[str], arquivo: Path)
         raise ValueError(f"'{arquivo.name}': cabeçalho incompatível ({'; '.join(detalhes)})")
 
 
-def ler_registros(arquivo: Path, modelo: type[Base]) -> list[dict[str, Any]]:
+def ler_registros(arquivo: Path, modelo: type[Base]) -> tuple[list[dict[str, Any]], int]:
     colunas_model = {coluna.name: coluna for coluna in modelo.__table__.columns}
     esperadas = colunas_do_csv(modelo)
+    colunas_ignoradas = ["optout"] if modelo is Clientes else []
+    colunas_entrada = esperadas + colunas_ignoradas
     registros = []
+    optouts_removidos = 0
     with arquivo.open("r", encoding="utf-8-sig", newline="") as stream:
         leitor = csv.DictReader(stream)
         if leitor.fieldnames is None:
-            return registros
+            return registros, optouts_removidos
         cabecalho = [campo.strip() for campo in leitor.fieldnames]
-        validar_cabecalho(cabecalho, esperadas, arquivo)
+        validar_cabecalho(cabecalho, colunas_entrada, arquivo)
         for numero_linha, registro in enumerate(leitor, start=2):
             if None in registro:
                 raise ValueError(f"'{arquivo.name}', linha {numero_linha}: valores extras")
+            if modelo is Clientes and registro["optout"].strip().casefold() in {"true", "t", "sim", "s", "1"}:
+                optouts_removidos += 1
+                continue
             valores = {
                 coluna: converter_valor(registro[coluna], colunas_model[coluna].type, modelo.__tablename__, coluna, numero_linha)
                 for coluna in esperadas
@@ -96,10 +102,10 @@ def ler_registros(arquivo: Path, modelo: type[Base]) -> list[dict[str, Any]]:
             elif modelo is Interacoes and valores["motivo_sac_principal"] is not None:
                 valores["motivo_sac_principal"] = normalizar_texto(valores["motivo_sac_principal"])
             registros.append(valores)
-    return registros
+    return registros, optouts_removidos
 
 
-def ler_pedidos(arquivo: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+def ler_pedidos(arquivo: Path, ids_clientes_validos: set[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, int]:
     """Separa o CSV bruto em pedidos únicos e seus itens."""
     tipos_pedido = {coluna.name: coluna.type for coluna in Pedidos.__table__.columns}
     tipos_item = {coluna.name: coluna.type for coluna in PedidoItens.__table__.columns}
@@ -127,6 +133,8 @@ def ler_pedidos(arquivo: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any
             })
             pedido["id_pedido"] = id_pedido
             pedido["canal"] = normalizar_texto(pedido["canal"]) if pedido["canal"] else None
+            if pedido["atraso_entrega_dias"] == 0:
+                pedido["atraso_entrega_dias"] = None
             item["categoria"] = normalizar_texto(item["categoria"]) if item["categoria"] else None
             grupo = grupos.setdefault(id_pedido, {"pedido": pedido, "itens": [], "datas_validas": []})
             if pedido["data_pedido"] is not None and pedido["data_pedido"] not in DATAS_SENTINELA:
@@ -135,20 +143,24 @@ def ler_pedidos(arquivo: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any
 
     pedidos = []
     itens = []
-    removidos = 0
+    removidos_sem_data = 0
+    removidos_optout = 0
     for grupo in grupos.values():
         pedido = grupo["pedido"]
+        if pedido["id_cliente"] not in ids_clientes_validos:
+            removidos_optout += 1
+            continue
         datas_validas = grupo["datas_validas"]
         # As linhas repetidas podem ter datas diferentes; usa uma data válida
         # de qualquer linha do mesmo id antes de descartar/substituir.
         if pedido["data_pedido"] in DATAS_SENTINELA:
             if not datas_validas:
-                removidos += 1
+                removidos_sem_data += 1
                 continue
             pedido["data_pedido"] = datas_validas[0]
         pedidos.append(pedido)
         itens.extend(grupo["itens"])
-    return pedidos, itens, removidos
+    return pedidos, itens, removidos_sem_data, removidos_optout
 
 
 def main() -> None:
@@ -173,22 +185,29 @@ def main() -> None:
 
     with Session(engine) as session:
         try:
+            ids_clientes_validos: set[str] = set()
             if "clientes" not in existentes and "clientes" in arquivos:
-                registros = ler_registros(arquivos["clientes"], Clientes)
+                registros, clientes_optout = ler_registros(arquivos["clientes"], Clientes)
                 inserir_em_lotes(session, Clientes, registros)
+                ids_clientes_validos = {registro["id_cliente"] for registro in registros}
                 print(f"CARREGADO: clientes ({len(registros)} linha(s))")
+                print(f"CLIENTES REMOVIDOS POR OPTOUT: {clientes_optout}")
             if "interacoes" not in existentes and "interacoes" in arquivos:
-                registros = ler_registros(arquivos["interacoes"], Interacoes)
+                registros, _ = ler_registros(arquivos["interacoes"], Interacoes)
+                total_interacoes = len(registros)
+                registros = [registro for registro in registros if registro["id_cliente"] in ids_clientes_validos]
                 inserir_em_lotes(session, Interacoes, registros)
                 print(f"CARREGADO: interacoes ({len(registros)} linha(s))")
+                print(f"INTERAÇÕES REMOVIDAS POR OPTOUT: {total_interacoes - len(registros)}")
             if "pedidos" not in existentes and "pedidos" in arquivos:
-                pedidos, itens, removidos = ler_pedidos(arquivos["pedidos"])
+                pedidos, itens, removidos_sem_data, pedidos_optout = ler_pedidos(arquivos["pedidos"], ids_clientes_validos)
                 inserir_em_lotes(session, Pedidos, pedidos)
                 inserir_em_lotes(session, PedidoItens, itens)
                 print(f"CARREGADO: pedidos ({len(pedidos)} linha(s))")
                 print(f"CARREGADO: pedido_itens ({len(itens)} linha(s))")
-                if removidos:
-                    print(f"PEDIDOS REMOVIDOS SEM DATA VÁLIDA: {removidos}")
+                print(f"PEDIDOS REMOVIDOS POR OPTOUT: {pedidos_optout}")
+                if removidos_sem_data:
+                    print(f"PEDIDOS REMOVIDOS SEM DATA VÁLIDA: {removidos_sem_data}")
             session.commit()
         except (csv.Error, ValueError) as erro:
             session.rollback()

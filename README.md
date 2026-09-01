@@ -63,6 +63,8 @@ python3 scripts/limpeza.py --banco ./dados.sqlite3
 O script converte nomes completos, siglas em minúsculo e valores com acentos para a sigla oficial. Também coloca em maiúsculo e remove acentos dos campos textuais configurados em `scripts/limpeza.py`. Valores desconhecidos de UF são preservados e listados no final.
 
 Ele também corrige `data_pedido` com as datas sentinela `1900-01-01` e `2099-12-31`, usando uma data válida de outro registro com o mesmo `id_pedido`. Quando não existe uma data válida para fazer a substituição, o registro é removido da base.
+Valores `0` em `pedidos.atraso_entrega_dias` são convertidos para `NULL`.
+Clientes com `optout = true` e seus pedidos, itens e interações relacionados são removidos; depois a coluna `optout` não faz parte da tabela `clientes`.
 
 ## Consultas
 
@@ -101,4 +103,10 @@ Para contar pedidos com `data_pedido` e registros de `ano_mes` fora do intervalo
 
 ```bash
 python3 scripts/pedidos_fora_periodo.py --banco ./dados.sqlite3
+```
+
+Para calcular a média de atraso de entrega por UF, desconsiderando pedidos sem atraso:
+
+```bash
+python3 scripts/media_atraso_por_uf.py --banco ./dados.sqlite3
 ```
