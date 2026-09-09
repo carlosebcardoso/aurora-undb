@@ -5,5 +5,9 @@ from .clientes import Clientes
 from .interacoes import Interacoes
 from .pedidos import Pedidos
 from .pedido_itens import PedidoItens
+from .dados_clientes import ClustersClientes, DadosClientes, DesviosCluster, ResultadosCluster
 
-__all__ = ["Base", "Clientes", "Interacoes", "Pedidos", "PedidoItens"]
+__all__ = [
+    "Base", "Clientes", "Interacoes", "Pedidos", "PedidoItens",
+    "DadosClientes", "ClustersClientes", "ResultadosCluster", "DesviosCluster",
+]

@@ -11,7 +11,6 @@ from sqlalchemy import create_engine, text
 
 DATA_CORTE = "2026-06-30"
 LIMITE_DIAS = 180
-TOLERANCIA_DIAS = 15
 
 
 def garantir_coluna_inativo(banco: Path) -> None:
@@ -30,94 +29,22 @@ def garantir_coluna_inativo(banco: Path) -> None:
         conexao.execute(
             text(
                 """
-                WITH pedidos_com_anterior AS (
-                    SELECT
-                        id_cliente,
-                        data_pedido,
-                        LAG(data_pedido) OVER (
-                            PARTITION BY id_cliente
-                            ORDER BY data_pedido
-                        ) AS pedido_anterior
-                    FROM pedidos
-                    WHERE data_pedido IS NOT NULL
-                      AND data_pedido <= :data_corte
-                ),
-                intervalos AS (
-                    SELECT
-                        id_cliente,
-                        data_pedido,
-                        julianday(data_pedido) - julianday(pedido_anterior)
-                            AS intervalo_dias
-                    FROM pedidos_com_anterior
-                    WHERE pedido_anterior IS NOT NULL
-                ),
-                intervalos_ordenados AS (
-                    SELECT
-                        id_cliente,
-                        intervalo_dias,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY id_cliente
-                            ORDER BY intervalo_dias
-                        ) AS posicao,
-                        COUNT(*) OVER (PARTITION BY id_cliente) AS quantidade
-                    FROM intervalos
-                ),
-                metricas AS (
-                    SELECT
-                        id_cliente,
-                        AVG(intervalo_dias) AS media_entre_pedidos,
-                        AVG(
-                            CASE
-                                WHEN posicao IN (
-                                    (quantidade + 1) / 2,
-                                    (quantidade + 2) / 2
-                                ) THEN intervalo_dias
-                            END
-                        ) AS mediana_pedidos
-                    FROM intervalos_ordenados
-                    GROUP BY id_cliente
-                ),
-                ultimos AS (
-                    SELECT id_cliente, MAX(data_pedido) AS data_ultimo_pedido
-                    FROM pedidos
-                    WHERE data_pedido IS NOT NULL
-                      AND data_pedido <= :data_corte
-                    GROUP BY id_cliente
-                ),
-                alvos AS (
-                    SELECT
-                        clientes.id_cliente,
-                        ultimos.data_ultimo_pedido,
-                        metricas.media_entre_pedidos,
-                        metricas.mediana_pedidos
-                    FROM clientes
-                    LEFT JOIN ultimos ON ultimos.id_cliente = clientes.id_cliente
-                    LEFT JOIN metricas ON metricas.id_cliente = clientes.id_cliente
-                )
                 UPDATE clientes
                 SET inativo = CASE
-                    WHEN alvos.data_ultimo_pedido IS NULL THEN 1
-                    WHEN julianday(:data_corte) - julianday(alvos.data_ultimo_pedido)
-                         <= :limite_dias THEN 0
-                    WHEN (alvos.media_entre_pedidos IS NOT NULL
-                          OR alvos.mediana_pedidos IS NOT NULL)
-                         AND julianday(:data_corte) - julianday(alvos.data_ultimo_pedido)
-                             <= CASE
-                                    WHEN COALESCE(alvos.media_entre_pedidos, -1)
-                                         > COALESCE(alvos.mediana_pedidos, -1)
-                                    THEN alvos.media_entre_pedidos
-                                    ELSE alvos.mediana_pedidos
-                                END + :tolerancia_dias THEN 0
+                    WHEN id_cliente IN (
+                        SELECT DISTINCT id_cliente
+                        FROM pedidos
+                        WHERE data_pedido IS NOT NULL
+                          AND julianday(:data_corte) - julianday(data_pedido)
+                              BETWEEN 0 AND :limite_dias
+                    ) THEN 0
                     ELSE 1
                 END
-                FROM alvos
-                WHERE clientes.id_cliente = alvos.id_cliente
                 """
             ),
             {
                 "data_corte": DATA_CORTE,
                 "limite_dias": LIMITE_DIAS,
-                "tolerancia_dias": TOLERANCIA_DIAS,
             },
         )
 
@@ -138,8 +65,8 @@ def main() -> None:
     garantir_coluna_inativo(args.banco)
     print(
         "Coluna 'inativo' atualizada com base na data de corte "
-        f"{DATA_CORTE}, limite de {LIMITE_DIAS} dias e tolerância de "
-        f"{TOLERANCIA_DIAS} dias."
+        f"{DATA_CORTE}: clientes sem compra nos últimos {LIMITE_DIAS} dias "
+        "marcados como inativos."
     )
 
 
